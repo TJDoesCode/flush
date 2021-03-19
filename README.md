@@ -16,5 +16,3 @@ It both provides implementations of common shell commands and provides an option
 - [x] ls (WIP)
 - [x] echo
 - [x] pwd
-- [ ] Uranus
-- [ ] Neptune

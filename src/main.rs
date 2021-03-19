@@ -1,10 +1,18 @@
-use clap::{App, AppSettings, Clap, IntoApp};
-use flush::{Cat, Cd, Echo, Ls, Pwd};
+#[macro_use]
+extern crate lazy_static;
+
+use clap::Clap;
+use flush::{commands::*, ProgState};
 use std::{
-    io::{self, BufRead},
-    path::PathBuf,
+    error::Error,
+    io::{self, stdout, BufRead, Write},
+    iter::once,
     process,
-    str::FromStr,
+    sync::{
+        mpsc,
+        mpsc::{Receiver, Sender},
+        Mutex,
+    },
 };
 
 #[derive(Clap, Debug)]
@@ -58,78 +66,77 @@ enum SubCommand {
     Cd(Cd),
 }
 
-impl FromStr for SubCommand {
-    type Err = ();
-    fn from_str(input: &str) -> Result<SubCommand, Self::Err> {
-        let str_ver = input.to_uppercase();
-        let mut iter = str_ver.split_whitespace();
-        match iter.next() {
-            Some("CAT") => {
-                let maybe_path = iter.next();
-                match maybe_path {
-                    Some(path) => Ok(SubCommand::Cat(Cat {
-                        path: Some(PathBuf::from(path)),
-                    })),
-                    None => Ok(SubCommand::Cat(Cat { path: None })),
-                }
+fn run_interactive(state: &Mutex<ProgState>) {
+    loop {
+        let stdin = io::stdin();
+        let mut line = String::new();
+
+        stdin.lock().read_line(&mut line).unwrap();
+
+        let parsed = Opts::try_parse_from(once("flush").chain(line.trim().split_whitespace()));
+        println!("{:#?}", parsed);
+
+        if let Err(e) = &parsed {
+            eprintln!("Parsing error: {}", e);
+        }
+
+        if let Some(subcmd) = parsed.unwrap_or_default().subcmd {
+            if let Err(err) = dispatch_cmd(subcmd, &state) {
+                eprintln!("Error: {}", err);
             }
-            Some("LS") => Ok(SubCommand::Ls(Ls {
-                dir: PathBuf::from(iter.next().unwrap_or("")),
-            })),
-            Some("ECHO") => {
-                let text: Vec<String> = iter.map(|t| t.to_owned()).collect();
-                Ok(SubCommand::Echo(Echo { text }))
-            }
-            _ => Err(()),
         }
     }
 }
 
+fn dispatch_cmd(subcmds: SubCommand, state: &Mutex<ProgState>) -> Result<(), Box<dyn Error>> {
+    //let mut state = state.lock().unwrap();
+    //state.lock().unwrap().set_child_running(true);
+    let (tx, rx): (Sender<bool>, Receiver<bool>) = mpsc::channel();
+
+    match subcmds {
+        SubCommand::Cat(c) => Cat::run(c.path, &state),
+        SubCommand::Ls(c) => Ls::run(c.dir),
+        SubCommand::Echo(c) => Echo::run(c.text),
+        SubCommand::Cd(c) => Cd::run(c.dir),
+        SubCommand::Pwd(_) => Pwd::run(),
+    }
+}
+
+lazy_static! {
+    static ref STATE: Mutex<ProgState> = ProgState::new();
+}
+
 fn main() {
+    stdout().flush().expect("Failed to flush stdout");
+
+    ctrlc::set_handler(|| {
+        let mut state = STATE.lock().unwrap();
+
+        state.kill_count += 1;
+
+        match state.kill_count {
+            1 => {
+                if state.child_running {
+                    state.set_child_running(false);
+                    return println!("(Press Ctrl+C again to abort)");
+                }
+                process::exit(2)
+            }
+            2 => process::exit(2),
+            _ => (),
+        }
+    })
+    .unwrap();
+
     let opts = Opts::parse();
     println!("{:#?}", opts);
 
-    let result = match opts.subcmd {
-        Some(SubCommand::Cat(c)) => Cat::run(c.path),
-        Some(SubCommand::Ls(c)) => Ls::run(c.dir),
-        Some(SubCommand::Echo(c)) => Echo::run(c.text),
-        Some(SubCommand::Cd(c)) => Cd::run(c.dir),
-        Some(SubCommand::Pwd(_)) => Pwd::run(),
-        None => loop {
-            println!("inner");
-            let mut app = Opts::into_app();
-            let stdin = io::stdin();
-            let mut line = String::new();
-
-            app = app.setting(AppSettings::NoBinaryName);
-            stdin.lock().read_line(&mut line).unwrap();
-
-            let parsed = app.try_get_matches_from(line.trim().split_whitespace());
-            println!("{:#?}", parsed);
-
-            if let Err(e) = &parsed {
-                eprintln!("Parsing error: {}", e);
-            }
-            let result;
-            match parsed.unwrap_or_default().subcommand() {
-                Some(("cat", sub_m)) => {
-                    let path: PathBuf = sub_m.value_of("path").unwrap().into();
-                    result = Cat::run(Some(path));
-                }
-                // Some(SubCommand::Ls(c)) => Ls::run(c.dir),
-                // Some(SubCommand::Echo(c)) => Echo::run(c.text),
-                // Some(SubCommand::Cd(c)) => Cd::run(c.dir),
-                // Some(SubCommand::Pwd(_)) => Pwd::run(),
-                _ => println!("Command not found"),
-            };
-            if let Err(err) = result {
-                eprintln!("Error: {}", err);
-            }
-        },
-    };
-
-    if let Err(err) = result {
-        eprintln!("Error: {}", err);
-        process::exit(1);
+    if let Some(subcmd) = opts.subcmd {
+        if let Err(err) = dispatch_cmd(subcmd, &STATE) {
+            eprintln!("Error: {}", err);
+            process::exit(1);
+        }
+    } else {
+        run_interactive(&STATE)
     }
 }
