@@ -1,7 +1,7 @@
 # flush - A $%@!tty shell
 
 Flush is a work-in-progress UNIX-like shell written in Rust as a way for me to learn the language.
-It both provides implementations of common shell commands and provides an optional interactive shell to run them in.
+It provides implementations of common shell commands with an optional interactive shell to run them in.
 
 ## Features
 - [ ] Common commands
